@@ -202,6 +202,18 @@ server.registerTool(
 );
 
 server.registerTool(
+  "flow_project",
+  {
+    title: "Open or create a Flow project",
+    description:
+      "Every generation happens in the Flow project that is open. With no name, lists the account's projects. With a name, opens the project with that exact title; with create: true, makes it when it does not exist yet. Free.",
+    inputSchema: shapes.project,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  (args) => reply(patient("flow_project", core.project(args))),
+);
+
+server.registerTool(
   "flow_trash",
   {
     title: "Move an item to Flow's Trash",

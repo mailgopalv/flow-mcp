@@ -322,3 +322,42 @@ The preview tool could not read the project while it lived in ~/Desktop; check t
   FLOW_MCP_PORT=8799 and FLOW_MCP_HOME=<scratch dir>. Never reuse the real home for that: a process that owns a port
   writes a fresh token to HOME/token, which locks every client of the real owner out (401). Symlink characters.json into
   the scratch home when looks must persist. Give the client a 60 s request timeout so the app's limit is reproduced.
+- PROJECTS (mapped 2026-10-10, first run on the Windows PC, a fresh account with no projects): home `flow.google.com/`
+  lists `<flow-project-card>`s - link `a.project-thumbnail-container` (aria "Open project", href /project/<uuid>), title =
+  the bare text nodes of `.project-title-label` (its buttons `Edit project title` / `Delete project` add ligature text),
+  plus button `New project`. A new project opens with a changelog dialog (`Get started` dismisses it) AND the agent session
+  panel open, titled with the date ("Oct 10 - 23:50") in textbox `Editable text`: fill + Enter renames it. Built in as
+  `flow_project` (openProject): no name lists, name opens the exact title, create: true makes it. e2e.mjs now opens/creates
+  the Flow project named by its first argument. The open path is verified through the tool; the create path's steps were
+  each verified by hand but not yet run through the tool. A fresh account also shows a one-time "Experience and shape AI
+  tools" opt-in dialog and a cookie banner on the home page - those are the user's choices, never click them.
+- SETTINGS POPOVER (2026-10-11): one Escape after applySettings was swallowed (right after switching aspect to 3:4) and the
+  open popover's `.cdk-overlay-container` then intercepted every click on `.ProseMirror` - flow_character failed after 30 s.
+  closeSettings now presses Escape, checks the `Image` radio is gone, retries, and finally toggles `Settings trigger`.
+  The image model now reads "Nano Banana 2.1" (pickModel matches by substring, so 'Nano Banana 2' still selects it).
+- INGREDIENTS PICKER REMEMBERS ITS TAB (2026-10-11): it reopens on the tab used last; an empty tab (Uploads) shows
+  "No assets found" and NO `Asset list` listbox, so attachAsset's wait for the listbox timed out before it ever switched
+  tabs (scene 2 of a reference_previous chain failed, scene 3 was skipped). attachAsset now waits for the listbox OR the
+  `Category navigation` tablist and walks All, Characters, Voices, Avatars, Images, Uploads. Also: the attached-chip count
+  used getByRole("button", { name: "Ingredient" }) without exact, which ALSO matched "Add ingredients to the prompt box",
+  so it always over-counted by one - now exact. `Clear prompt` removes reference chips too (verified).
+- FRESH VIDEO TILE MENU STAYS SHUT (2026-10-11, Omni 1.1 Flash 720p 10 s, three shots in a row): straight after a clip
+  finishes, its `More options` menu does not open - three tries, and again right after a page reload - then works a minute
+  or two later (flow_download fetched both clips fine). The clip is already paid for at that point, so runGeneration now
+  catches the download failure, waits 30 s, reloads, and fetches by title (downloadAsset), up to 4 rounds. Verified live:
+  shot 3 came back with the note "downloaded after a reload". Root cause not seen - capture the tile DOM at the moment of
+  failure next time. The rename also silently fails in that window, so fresh clips keep Flow's own titles.
+- UK ENGLISH ACCOUNT (the Windows PC's gentlevibes2024 account): Flow says "Favourite", "Move to bin" and left-nav "Bin",
+  not "Favorite"/"Move to trash"/"Trash". trashAsset now matches /^Move to (trash|bin)$/ and, when neither shows, reports
+  what the menu offered. Verified live here on a staging upload (fm-78e42ceb-ref1.jpeg -> Flow's bin).
+- Omni 1.1 Flash Frames mode (Start + End frame) at 720p/10 s quotes 15 credits, same as Ingredients. A still pair as
+  first/last frames lands the shot exactly on the second still.
+- FILES LIVE IN THE REPO (user's call, 2026-10-11): the films root is `<repo>/projects/` (git-ignored), not ~/flow-mcp-out.
+  OUTPUT_ROOT / projectDir / castDir are in chrome.ts (flow.ts cannot import core.ts). One folder per project holds
+  EVERYTHING it made: clips, stills, lastframes, narration, the final render, `_cast/` portraits (flow_character and
+  flow_character_edit take `project`), and `_work/` for anything made by hand along the way (prompt JSON, trimmed
+  narration takes, contact sheets). Do hand-made intermediates there too, never only in temp. FLOW_MCP_OUTPUT overrides.
+- VANISHING CLIP (2026-10-11, ai-in-ten-years shot 2, 9:16): the clip rendered and got a title ("Man walks away from
+  desk"), then disappeared from the grid with no error tile, and the 15 credits were NOT charged (balance confirmed). Likely
+  a content filter on "deepfaked news anchor", unconfirmed - the identical prompt passed on the re-run. The download
+  fallback now reports a removed clip as removed. 9:16 Omni 720p 10 s also quotes 15 credits.

@@ -1,13 +1,20 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type Page } from "playwright-core";
 
 export const FLOW_URL = "https://flow.google.com/";
 const FLOW_HOSTS = /^https:\/\/(flow\.google\.com|labs\.google\/fx)/;
 export const HOME_DIR = process.env.FLOW_MCP_HOME ?? join(homedir(), ".flow-mcp");
 export const PROFILE_DIR = join(HOME_DIR, "chrome-profile");
+// Films live in the repo's own projects/ folder (git-ignored), one folder per project, so everything a project makes -
+// clips, stills, narration, its cast's portraits, the final render - sits together. FLOW_MCP_OUTPUT still overrides it.
+export const OUTPUT_ROOT = process.env.FLOW_MCP_OUTPUT ?? fileURLToPath(new URL("../projects", import.meta.url));
+export const projectDir = (project: string) => resolve(OUTPUT_ROOT, project.replace(/[^\w.-]+/g, "_"));
+// Character portraits go into the project that uses them; with no project, into a shared _cast at the root.
+export const castDir = (project?: string) => join(project ? projectDir(project) : OUTPUT_ROOT, "_cast");
 export const CDP_PORT = Number(process.env.FLOW_MCP_CDP_PORT ?? 9333);
 const CDP_URL = `http://127.0.0.1:${CDP_PORT}`;
 

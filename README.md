@@ -129,7 +129,7 @@ Nothing below costs a credit until step 4, and the assistant asks before spendin
    quote first and the scene is skipped if it is over your cap.
 5. **Narrate it.** *"Record this line with a warm documentary voice."* Free, any length.
 6. **Cut it.** *"Join the three shots under the narration, don't freeze the last frame."*
-   The finished file lands in `~/flow-mcp-out/<project>/`.
+   The finished file lands in `projects/<project>/` inside this folder.
 
 ---
 
@@ -204,7 +204,7 @@ character or product consistent). Flow's *composer* takes either frames or refer
 when you need a start frame **and** a character locked together, use `flow_continue`, which goes through
 Flow's agent mode and does both.
 
-Output lands in `~/flow-mcp-out/<project>/scene-NN.ext`.
+Output lands in `projects/<project>/scene-NN.ext` (one folder per project, holding its clips, stills, narration, `_cast` portraits and the final render; `FLOW_MCP_OUTPUT` moves it elsewhere).
 
 ### Narration with Google's voices (optional)
 

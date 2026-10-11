@@ -22,6 +22,13 @@ export const PLAYBOOK = {
     "Put spoken lines in quotes and say who speaks; keep a line short enough for the clip length.",
     "For 9:16 social video set aspect_ratio on every scene.",
   ],
+  files: [
+    "Every piece of work is one project: pick a short kebab-case name (e.g. 'pip-lamplighter') and use that SAME name as `project` in every call - flow_generate, flow_download, flow_narrate, flow_assemble, flow_edit, flow_continue, flow_character and flow_character_edit.",
+    "All files land in <flow-mcp>/projects/<project>/ (flow_status shows output_root): stills and clips as scene-NN, narration-NN, character portraits in _cast/, and the final render.",
+    "flow_assemble names the final render <project>-final.mp4 by default; keep that name so the finished film is obvious in the folder.",
+    "Anything you make by hand along the way (prompt JSON, trimmed or re-timed audio, extracted frames, contact sheets) goes in projects/<project>/_work/, never only in a temp folder. Nothing made for a project may live outside its folder.",
+    "Never delete or overwrite files in a project folder unless the user asks; tools continue numbering instead of overwriting.",
+  ],
   continuity: [
     "chain_previous: true starts a scene on the last frame of the scene before it, giving one continuous take across clips.",
     "first_frame + last_frame makes Flow animate between two stills; generate both stills as free images first for controlled transitions.",

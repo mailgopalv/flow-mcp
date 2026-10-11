@@ -2,7 +2,7 @@ import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, 
 import { homedir, tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import type { Locator, Page } from "playwright-core";
-import { HOME_DIR, getFlowPage } from "./chrome.js";
+import { FLOW_URL, HOME_DIR, castDir, getFlowPage } from "./chrome.js";
 import type { Job } from "./queue.js";
 import { extractZip } from "./platform.js";
 
@@ -31,7 +31,7 @@ export async function getFlowState(detailed = false): Promise<FlowState> {
   const inProject = /\/project\//.test(url);
   const state: FlowState = { url, signedIn, inProject };
   if (!signedIn) state.hint = "Not signed in. Run `npm run login` and sign in to Google in the Flow Chrome window.";
-  else if (!inProject) state.hint = "Signed in, but no project is open. Open or create a project in the Flow Chrome window.";
+  else if (!inProject) state.hint = "Signed in, but no project is open. Call flow_project with a name to open it (create: true makes a new one).";
   else if (detailed) {
     state.plan = await page.getByRole("button", { name: "Account details" }).innerText().then((t) => t.trim().split("\n")[0], () => undefined);
     state.credits_remaining = await readCredits(page).catch(() => undefined);
@@ -226,6 +226,19 @@ async function openSettings(page: Page): Promise<void> {
   if (!(await probe.isVisible().catch(() => false))) throw new Error("Could not open Flow's generation settings popover.");
 }
 
+// One Escape is sometimes swallowed (seen 2026-10-11 right after an aspect change) and the open popover then covers
+// the prompt box, so check it really closed and fall back to toggling the trigger.
+async function closeSettings(page: Page): Promise<void> {
+  const probe = page.getByRole("radio", { name: "Image", exact: true });
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt < 3) await page.keyboard.press("Escape");
+    else await settingsTrigger(page).click().catch(() => {});
+    await pause(page, 500);
+    if (!(await probe.isVisible().catch(() => false))) return;
+  }
+  throw new Error("Flow's generation settings popover would not close.");
+}
+
 async function pickRadio(page: Page, name: string | RegExp): Promise<void> {
   const radio = page.getByRole("radio", { name, exact: typeof name === "string" }).first();
   if (!(await radio.isVisible().catch(() => false))) {
@@ -268,8 +281,7 @@ async function applySettings(page: Page, job: Job): Promise<number> {
   await pause(page, 600);
   const costText = await page.getByRole("link", { name: /credits?$/ }).innerText();
   const cost = Number(costText.match(/\d+/)?.[0] ?? NaN);
-  await page.keyboard.press("Escape");
-  await pause(page, 400);
+  await closeSettings(page);
   if (Number.isNaN(cost)) throw new Error(`Could not read the credit cost from Flow ("${costText}").`);
   return cost;
 }
@@ -305,11 +317,13 @@ const optionByName = (list: Locator, name: string) =>
 async function attachAsset(page: Page, opener: Locator, assetName: string): Promise<void> {
   await opener.click();
   const list = page.getByRole("listbox", { name: "Asset list" });
-  await list.waitFor({ state: "visible", timeout: 10_000 });
+  const tabs = page.getByRole("tablist", { name: "Category navigation" });
+  await list.or(tabs).first().waitFor({ state: "visible", timeout: 10_000 });
   let option = optionByName(list, assetName);
-  // Voices, characters and avatars live behind their own tabs, so look there when "All" does not have it.
+  // The ingredients picker reopens on the tab used last; an empty one ("No assets found", seen 2026-10-11 on
+  // Uploads) shows no listbox at all. Voices, characters and avatars also live behind their own tabs.
   if (!(await option.isVisible().catch(() => false))) {
-    for (const tab of ["Voices", "Characters", "Avatars", "Uploads"]) {
+    for (const tab of ["All", "Characters", "Voices", "Avatars", "Images", "Uploads"]) {
       const t = page.getByRole("tab", { name: tab, exact: true });
       if (!(await t.isVisible().catch(() => false))) continue;
       await t.click();
@@ -560,6 +574,62 @@ async function ensureProjectGrid(page: Page): Promise<void> {
   await scrollToTop(page);
 }
 
+export interface FlowProject { title: string; url: string }
+
+// The home page lists projects as <flow-project-card>: the link is the thumbnail, the title is the bare text of
+// .project-title-label (its buttons carry icon ligatures "edit"/"delete", so only text nodes are read).
+async function readProjectCards(page: Page): Promise<FlowProject[]> {
+  return page.evaluate(() =>
+    [...document.querySelectorAll("flow-project-card")].map((card) => {
+      const label = card.querySelector(".project-title-label");
+      const title = label ? [...label.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join("").trim() : "";
+      return { title, url: (card.querySelector("a.project-thumbnail-container") as HTMLAnchorElement | null)?.href ?? "" };
+    }),
+  );
+}
+
+async function projectTitle(page: Page): Promise<string | undefined> {
+  return page.getByRole("textbox", { name: "Editable text" }).first().inputValue({ timeout: 5000 }).catch(() => undefined);
+}
+
+// Lists projects, or opens one by exact title. A new project lands with a changelog dialog ("Get started") and the
+// agent session panel open, and is titled with the date until renamed through its "Editable text" box.
+export async function openProject(name?: string, create = false): Promise<{ open?: string; url: string; created?: boolean; projects?: string[] }> {
+  const page = await getFlowPage();
+  if (/\/about|accounts\.google\.com/.test(page.url())) throw new Error("Not signed in. Run `npm run login` first.");
+  if (name && /\/project\//.test(page.url()) && (await projectTitle(page)) === name) return { open: name, url: page.url() };
+  await dismissOverlays(page);
+  await page.goto(FLOW_URL, { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "New project" }).waitFor({ timeout: 30_000 });
+  await pause(page, 1500);
+  const cards = await readProjectCards(page);
+  if (!name) return { url: page.url(), projects: cards.map((c) => c.title) };
+  const hits = cards.filter((c) => c.title === name);
+  if (hits.length > 1) throw new Error(`Two Flow projects are called "${name}". Rename one in Flow first.`);
+  let created = false;
+  if (hits.length) await page.goto(hits[0].url, { waitUntil: "domcontentloaded" });
+  else if (!create) throw new Error(`No Flow project called "${name}". Existing: ${cards.map((c) => c.title).join(", ") || "none"}. Pass create: true to make it.`);
+  else {
+    await page.getByRole("button", { name: "New project" }).click();
+    created = true;
+  }
+  await page.waitForURL(/\/project\//, { timeout: 30_000 });
+  await pause(page, 3000);
+  const getStarted = page.getByRole("button", { name: "Get started" });
+  if (await getStarted.isVisible().catch(() => false)) await getStarted.click().catch(() => {});
+  if (created) {
+    const title = page.getByRole("textbox", { name: "Editable text" }).first();
+    await title.click();
+    await title.fill(name);
+    await title.press("Enter");
+    await pause(page, 1200);
+  }
+  const panel = page.getByRole("button", { name: "Start new session" });
+  if (await panel.isVisible().catch(() => false)) await page.getByRole("button", { name: "Close", exact: true }).click().catch(() => {});
+  await pause(page, 800);
+  return { open: await projectTitle(page), url: page.url(), created };
+}
+
 // Drives one generation in the Flow tab and returns the downloaded file paths.
 export async function runGeneration(job: Job): Promise<string[]> {
   const state = await getFlowState();
@@ -601,7 +671,7 @@ export async function runGeneration(job: Job): Promise<string[]> {
   }
   const wanted = (s.reference_images ?? []).length;
   if (wanted) {
-    const attached = await page.getByRole("button", { name: "Ingredient" }).count();
+    const attached = await page.getByRole("button", { name: "Ingredient", exact: true }).count();
     if (attached < wanted) throw new Error(`Only ${attached} of ${wanted} reference image(s) attached in Flow; nothing was generated.`);
   }
 
@@ -627,7 +697,43 @@ export async function runGeneration(job: Job): Promise<string[]> {
     if (renamed) job.note = [job.note, `renamed in Flow to ${basename(s.output_dir)}-${label}`].filter(Boolean).join(" · ");
     await pause(page, 800);
     const stem = join(s.output_dir, label);
-    files.push(...(await downloadMedia(page, id, stem, s.download_quality)));
+    const title = (await mediaTile(page, id).getAttribute("aria-label", { timeout: 5000 }).catch(() => null)) || undefined;
+    try {
+      files.push(...(await downloadMedia(page, id, stem, s.download_quality)));
+    } catch (err) {
+      // 2026-10-11: a 10 s Omni clip that had just finished would not open its tile menu in three tries, nor right after
+      // a reload, while the same tile downloaded fine through flow_download a minute or two later. The clip is paid for by now, so never give up
+      // on it here: reload, let the grid settle, and fetch it by title the way flow_download does (newest first).
+      // Seen twice the same evening: the menu stayed shut for a minute or two after the clip finished, then worked.
+      // So keep trying for about two minutes, reloading each time, before handing the job back as failed.
+      if (!title) throw err;
+      let saved: string[] | undefined;
+      let last: unknown = err;
+      for (let attempt = 0; attempt < 4 && !saved; attempt++) {
+        await pause(page, 30_000);
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await pause(page, 4000);
+        await ensureProjectGrid(page);
+        saved = await downloadAsset(title, stem, s.download_quality ?? "original").catch((again: unknown) => {
+          last = again;
+          return undefined;
+        });
+      }
+      if (!saved && /No asset whose title/.test(String((last as Error)?.message ?? last))) {
+        // 2026-10-11: a 9:16 clip about a deepfaked news anchor rendered, got its title, then vanished from the grid
+        // with no failed tile - and was NOT charged. Saying "generated, fetch it later" sent the user hunting for it.
+        throw new Error(
+          `Flow rendered "${title}" and then removed it from the project (no tile left, not even a failed one). Flow does not charge for removed clips, but check credits_remaining before re-running.`,
+        );
+      }
+      if (!saved) {
+        throw new Error(
+          `Generated in Flow as "${title}" but it could not be downloaded (${String((last as Error)?.message ?? last)}). flow_download fetches it without spending credits again.`,
+        );
+      }
+      files.push(...saved);
+      job.note = [job.note, "downloaded after a reload (the fresh tile's menu would not open)"].filter(Boolean).join(" · ");
+    }
     await pause(page, 1500);
   }
   return files;
@@ -712,9 +818,9 @@ async function leaveCharacterEditor(page: Page): Promise<void> {
 // moves over the picture - the same rule as grid tiles - so a plain click lands on the image and times out. That, plus
 // Playwright's download event, is why an edit that worked never reached disk (2026-10-02). Point at the picture, then
 // download through the same watched folders as every other file.
-async function savePortrait(page: Page, name: string): Promise<string> {
+async function savePortrait(page: Page, name: string, project?: string): Promise<string> {
   await useOwnDownloadDir(page);
-  const dir = join(process.env.FLOW_MCP_OUTPUT ?? join(homedir(), "flow-mcp-out"), "_cast");
+  const dir = castDir(project);
   mkdirSync(dir, { recursive: true });
   const picture = page.getByRole("img", { name: "Generated character image" }).first();
   const button = page.getByRole("button", { name: "Download image", exact: true });
@@ -737,7 +843,7 @@ async function savePortrait(page: Page, name: string): Promise<string> {
 // Opens an existing character and restyles its portrait in place (Nano Banana, free) instead of making a new one.
 // Without a change it only saves the character's current portrait: for a look changed by hand in Flow, or an edit whose
 // portrait never reached disk.
-export async function editCharacter(name: string, change?: string, job?: Job): Promise<{ name: string; portrait?: string; note?: string }> {
+export async function editCharacter(name: string, change?: string, job?: Job, project?: string): Promise<{ name: string; portrait?: string; note?: string }> {
   const state = await getFlowState();
   if (!state.signedIn || !state.inProject) throw new Error(state.hint);
   const page = await getFlowPage();
@@ -787,7 +893,7 @@ export async function editCharacter(name: string, change?: string, job?: Job): P
   let portrait: string | undefined;
   let note: string | undefined;
   try {
-    portrait = await savePortrait(page, name);
+    portrait = await savePortrait(page, name, project);
   } catch (err) {
     note = `${change ? `${name} was changed in Flow, but the new` : "The"} portrait could not be saved (${err instanceof Error ? err.message : String(err)}). Call flow_character_edit with just the name to save it.`;
   }
@@ -836,7 +942,14 @@ export async function trashAsset(name: string): Promise<{ trashed: string }> {
   const tile = tileOf(page, same[0]);
   await hoverTile(page, tile);
   await tile.getByRole("button", { name: "More options" }).click();
-  await page.getByRole("menuitem", { name: "Move to trash", exact: true }).click();
+  // US accounts say "Move to trash", UK ones "Move to bin" (seen 2026-10-11 on the Windows PC's account).
+  const trash = page.getByRole("menuitem", { name: /^Move to (trash|bin)$/i });
+  if (!(await trash.isVisible({ timeout: 5000 }).catch(() => false))) {
+    const items = await page.locator('[role="menuitem"]').evaluateAll((ms) => ms.map((m) => (m.textContent ?? "").replace(/\s+/g, " ").trim()));
+    await page.keyboard.press("Escape");
+    throw new Error(items.length ? `Flow's tile menu has no "Move to trash/bin" item. It offered: ${items.join(" | ")}` : "Flow's tile menu did not open.");
+  }
+  await trash.click();
   await pause(page, 2000);
   if (await tile.count()) throw new Error(`"${name}" is still in the project - Flow did not move it to Trash.`);
   await scrollToTop(page);
@@ -869,6 +982,7 @@ async function downloadScene(page: Page, scene: FlowAsset, targetStem: string): 
 
 export interface CharacterParams {
   name: string;
+  project?: string;
   image?: string;
   describe?: string;
   aspect_ratio?: string;
@@ -904,7 +1018,7 @@ export async function createCharacter(c: CharacterParams, job?: Job): Promise<{ 
   if (!c.image) {
     if (!c.describe) throw new Error("Pass either an image or a description for the character.");
     if (job) job.progress = "drawing the character";
-    const dir = join(process.env.FLOW_MCP_OUTPUT ?? join(homedir(), "flow-mcp-out"), "_cast");
+    const dir = castDir(c.project);
     const made = await runGeneration({
       ...(job ?? ({ id: "char", status: "running", files: [], attempts: 1, createdAt: "" } as unknown as Job)),
       files: [],

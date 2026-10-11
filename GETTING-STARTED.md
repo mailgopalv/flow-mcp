@@ -185,7 +185,7 @@ asks before spending.
 5. *"Record a warm narration for it."* (free)
 6. *"Put the narration on the clip."* (free)
 
-Everything you make is saved in the **flow-mcp-out** folder in your home folder.
+Everything you make is saved in the **projects** folder inside flow-mcp, one folder per project.
 
 **No assistant?** Open Flow Studio and work through its tabs from left to right: Cast, Frames, Shots,
 Voice, Restyle, Cut.

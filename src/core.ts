@@ -1,19 +1,18 @@
 import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { assemble, localVoices, speakLocally } from "./assemble.js";
 import { GEMINI_VOICES, geminiKey, saveGeminiKey, speakWithGemini } from "./gemini.js";
 import { extractLastFrame } from "./chain.js";
-import { characterLook, createCharacter, downloadAsset, trashAsset, editCharacter, getFlowState, listAssets, listCharacters, rememberCharacter, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
+import { characterLook, createCharacter, downloadAsset, openProject, trashAsset, editCharacter, getFlowState, listAssets, listCharacters, rememberCharacter, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
 import { JobQueue, type Job } from "./queue.js";
+import { OUTPUT_ROOT, projectDir } from "./chrome.js";
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
 
-export const OUTPUT_ROOT = process.env.FLOW_MCP_OUTPUT ?? join(homedir(), "flow-mcp-out");
 const words = (s: string) => s.split(/[^a-z0-9]+/i).filter((w) => w.length > 3).map((w) => w.toLowerCase());
 
-export const projectDir = (project: string) => resolve(OUTPUT_ROOT, project.replace(/[^\w.-]+/g, "_"));
+export { OUTPUT_ROOT, projectDir };
 
 const sceneSchema = z.object({
   prompt: z.string().min(1).describe("Full English prompt for one clip: action, shot and camera move, location, style, light, sound."),
@@ -80,7 +79,7 @@ export const shapes = {
       .default(1)
       .describe("Volume of the clips' own sound, 0-1. Lower it (around 0.2-0.3) so a narration sits clearly on top; 1 keeps it as recorded."),
     voiceover: z.string().optional().describe("Absolute path to a voiceover audio file, starts at 0:00."),
-    output_name: z.string().default("final"),
+    output_name: z.string().min(1).optional().describe("File name of the render. Default: <project>-final."),
     hold_last_frame: z.boolean().default(true).describe("Freeze the final frame so a longer voiceover is not cut off."),
   },
   agent: {
@@ -136,6 +135,10 @@ export const shapes = {
       .optional()
       .describe("Skip the guard that refuses to run when Flow already holds a fresh-looking continuation of this clip. Only pass it when you have checked the grid and genuinely want another paid take."),
   },
+  project: {
+    name: z.string().min(1).optional().describe("Exact title of the Flow project to open. Omit to list the projects."),
+    create: z.boolean().default(false).describe("Create the project when none has that title."),
+  },
   trash: { name: z.string().min(1).describe("Exact title of the item to move to Flow's Trash, as listed by flow_assets.") },
   set_key: { key: z.string().min(1).max(200) },
   discard: { path: z.string().min(1).describe("A saved film, still, narration or whole project folder inside the films folder, to move to this computer's bin (Mac Trash, Windows Recycle Bin).") },
@@ -143,6 +146,7 @@ export const shapes = {
   characters: {},
   character_edit: {
     name: z.string().min(1).describe("Character to change, as listed by flow_characters."),
+    project: z.string().min(1).optional().describe("Project folder to save the new portrait in (<project>/_cast). Default: a shared _cast folder."),
     change: z
       .string()
       .min(1)
@@ -162,6 +166,7 @@ export const shapes = {
   },
   character: {
     name: z.string().min(1).max(60).describe("Character name; scenes then reference it as 'asset:<name>' in reference_images."),
+    project: z.string().min(1).optional().describe("Project folder the character belongs to; its portrait is saved in <project>/_cast. Default: a shared _cast folder."),
     describe: z
       .string()
       .max(1200)
@@ -212,6 +217,7 @@ export interface Core {
   characters(): Promise<unknown>;
   character_edit(a: Args<"character_edit">): Promise<unknown>;
   edit(a: Args<"edit">): Promise<unknown>;
+  project(a: Args<"project">): Promise<unknown>;
   trash(a: Args<"trash">): Promise<unknown>;
   discard(a: Args<"discard">): Promise<unknown>;
   set_key(a: Args<"set_key">): Promise<unknown>;
@@ -362,7 +368,7 @@ export class LocalCore implements Core {
   }
 
   async assemble({ project, ...rest }: Args<"assemble">) {
-    return assemble({ dir: projectDir(project), ...rest });
+    return assemble({ dir: projectDir(project), ...rest, output_name: rest.output_name ?? `${project}-final` });
   }
 
   // Everything already downloaded, newest project first, so the panel can show past work after a restart.
@@ -457,6 +463,11 @@ export class LocalCore implements Core {
     return { trashed: target, to: moveToBin(target), bin: BIN };
   }
 
+  async project({ name, create }: Args<"project">) {
+    if (this.queue.busy) throw new Error(BUSY);
+    return openProject(name, create);
+  }
+
   async trash({ name }: Args<"trash">) {
     if (this.queue.busy) throw new Error(BUSY);
     return trashAsset(name);
@@ -470,9 +481,9 @@ export class LocalCore implements Core {
     return { ...made, use_as: `asset:${a.name}` };
   }
 
-  async character_edit({ name, change, look }: Args<"character_edit">) {
+  async character_edit({ name, project, change, look }: Args<"character_edit">) {
     if (this.queue.busy) throw new Error(BUSY);
-    const out = await editCharacter(name, change);
+    const out = await editCharacter(name, change, undefined, project);
     // Every scene that references the character quotes this description in its character lock, so it has to describe
     // the NEW look - "deep navy coat" left in it would argue with a portrait whose coat is now red.
     if (look) rememberCharacter(name, look);

@@ -1,4 +1,5 @@
 // Manual end-to-end check: node scripts/e2e.mjs <project> '<scenes json>'
+// Opens the Flow project titled <project> (creating it if needed); files land in the local folder of the same name.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
@@ -8,6 +9,8 @@ await client.connect(new StdioClientTransport({ command: "node", args: ["dist/in
 const call = async (name, args = {}) =>
   JSON.parse((await client.callTool({ name, arguments: args }, undefined, { timeout: 960_000 })).content[0].text);
 
+console.log("PROJECTS", JSON.stringify(await call("flow_project", {})));
+console.log("OPEN", JSON.stringify(await call("flow_project", { name: project, create: true })));
 console.log("STATUS", JSON.stringify((await call("flow_status")).flow));
 const gen = await call("flow_generate", { project, scenes: JSON.parse(scenesJson) });
 console.log("QUEUED", gen.jobs.map((j) => j.id), gen.output_dir);
