@@ -38,6 +38,40 @@ projects/<project>/
     contact-sheets/        frame grids used to check a shot
 ```
 
+## Dialogue reel recipe (two characters talking, 9:16, captions on top)
+
+Learned on claude-reel-p1/p2 (2026-10) - the user's look, settled after three versions. Follow it from the start.
+For a full reel from a script, use the **`dialogue-reel` skill** and its engine `scripts/reel.mjs`; the summary below
+is kept for reference.
+
+1. **Check the account**: `flow_status` shows `plan` and `credits_remaining`. With two Google accounts signed in Flow
+   opens the default one; the user signs into only the account they want to use.
+2. **Script first**, short and funny, approved by the user before anything is generated. Every line must answer the
+   line before it (a callback that does not answer the question gets flagged).
+3. **Cast**: crop ONE clean front view from each character sheet into `_work/cast-crops/`, then `flow_character`
+   with `image`. Robots without arms: say so in every prompt ("NO arms, NO neck"), Flow adds limbs otherwise.
+4. **Free stills first** (Nano Banana, 0 credits): a wide of both, a close-up of each. The human's close-up must have a
+   closed LINE mouth. Check every still against the sheet before any paid step; redraw off-model ones.
+5. **Voices**: one `flow_narrate` call per line, run one at a time (never in parallel). Human: a male/female voice as
+   asked; read `heard` on every take and re-record or re-caption mismatches; `max_pause: 0.45` for deadpan lines.
+   Free tier: 10 TTS takes a day.
+6. **Paid clips (ask first, 7 credits per 4 s 720p)** only for: silent human reactions (looks down, blank stare), the
+   bot talking (its own eye/antenna motion), the bot sighing, and the ending wide. NEVER a clip of the human talking:
+   Omni opens the mouth with teeth whatever the prompt says.
+7. **Check every clip's faces** with crops sampled every 0.25 s (`fps=4,crop=...,tile=16x1`). Remove any mouth dash
+   on the bot with ffmpeg `delogo` (time-windowed) - never an opaque box: delogo leaves a soft glow in the mouth
+   area while the bot talks, which the user likes. Trim the ending before anyone laughs with an open mouth.
+8. **Edit** with `_work/build-edit.mjs` (copy claude-reel-p2's as the template): the human talks on the line-mouth
+   still held perfectly still with `mouths` drawing the thin/thick line (default `thick: 4` - the change must be
+   clearly visible); the bot talks on its moving clip; long bot
+   lines start on the sigh clip and cut to the talking clip; neighbouring cuts of the same shot are merged; cuts are
+   frame-exact. NO `bounce` - it shakes the whole frame and the user rejected it.
+9. **Render** with `flow_assemble`: `clips` from the edit, `voiceover` = the mixed dialogue, `clip_volume: 0`,
+   `mouths`, `overlays: { captions, caption_style: "line-top" }`. Review a 1 fps contact sheet before handing over.
+10. **Publish** the `resolution: "1080p"` master (a 720p upload shows only SD on YouTube) with `flow_publish`: show the
+   user video, channels, title, caption and time first; test new channels as `privacy: "private"`; then `flow_posts`
+   to confirm state PUBLISHED and get the link.
+
 ## Rules
 
 - Never leave a project file only in a temp or scratch folder. If a step needs scratch space, move the result into

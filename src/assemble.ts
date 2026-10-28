@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 
+import { overlayFilter, type Overlays } from "./overlays.js";
 import { FFMPEG_HINT, IS_WIN, powershell, psQuote } from "./platform.js";
 
 const run = promisify(execFile);
@@ -18,6 +19,10 @@ export interface AssembleOptions {
   voiceover?: string;
   output_name: string;
   hold_last_frame?: boolean;
+  overlays?: Overlays;
+  bounce?: { start: number; end: number }[];
+  mouths?: Mouth[];
+  resolution?: "source" | "1080p";
 }
 
 interface ClipInfo {
@@ -99,6 +104,17 @@ export async function localVoices(): Promise<{ name: string; description: string
     .filter((v) => !/^(Bad News|Bahh|Bells|Boing|Bubbles|Cellos|Good News|Jester|Organ|Superstar|Trinoids|Whisper|Wobble|Zarvox|Albert|Fred|Grandma|Grandpa|Junior|Kathy|Princess|Ralph|Rocko|Shelley|Sandy|Eddy|Flo|Reed|Rishi)/.test(v.name));
 }
 
+// Caps every pause in a recorded line at `maxPause` seconds (2026-10-26: a 'dry, deadpan, very tired' Gemini take of
+// three short sentences came back 11.7 s long, 2-2.4 s of silence between each). Lead-in and tail silence stay as
+// they are; only gaps inside the line shrink.
+export async function tightenPauses(file: string, maxPause: number): Promise<number> {
+  const tmp = file.replace(/(\.\w+)$/, ".tight$1");
+  await run(FFMPEG, ["-y", "-i", file, "-af", `silenceremove=stop_periods=-1:stop_duration=${maxPause}:stop_threshold=-38dB:stop_silence=${maxPause}`, "-c:a", "aac", "-b:a", "192k", tmp]);
+  renameSync(tmp, file);
+  const { stdout } = await run(FFPROBE, ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", file]);
+  return Number(stdout.trim());
+}
+
 // Speaks a line with this computer's own voice. Free and instant, but only as good as the installed voice.
 export async function speakLocally(text: string, voice: string, target: string): Promise<{ output: string; duration: number }> {
   const stem = target.replace(/\.\w+$/, "");
@@ -124,6 +140,44 @@ export async function speakLocally(text: string, voice: string, target: string):
   return { output: target, duration: Number(stdout.trim()) };
 }
 
+// A character with no mouth "talks" by bobbing, like the low-poly figure in the user's reference reel (mapped
+// 2026-10-26): during each span the whole frame hops up a few pixels about four times a second with a little sway.
+// The picture is scaled up 4% so the moving crop never shows an edge. Times are film seconds.
+export function bounceFilter(spans: { start: number; end: number }[], width: number, height: number): string {
+  if (!spans.length) return "";
+  const on = spans.map((s) => `between(t,${s.start.toFixed(2)},${s.end.toFixed(2)})`).join("+");
+  const amp = Math.round(height * 0.009);
+  const x = `(iw-ow)/2+(${on})*${Math.round(amp * 0.5)}*sin(2*PI*2.3*t)`;
+  const y = `(ih-oh)/2-(${on})*${amp}*abs(sin(2*PI*3.9*t))`;
+  return `scale=${Math.round(width * 1.04 / 2) * 2}:${Math.round(height * 1.04 / 2) * 2},crop=${width}:${height}:x='${x}':y='${y}'`;
+}
+
+// A figurine mouth drawn in the edit (mapped 2026-10-26 from the user's reference reel, where the speaker's mouth is a
+// short dark line that only goes thin-thick-thin). Asking Omni for that failed: "talks ... mouth NEVER opens, no teeth"
+// still opened the mouth with teeth, 7 credits gone. So the line is drawn over a locked-off shot whose mouth sits at a
+// known spot: a thin bar for the whole span and a thick bar switched on and off in a speech-like rhythm. drawbox
+// fixes its size once, but `enable` is re-evaluated every frame, hence two bars rather than one changing height.
+// x, y (centre) and width are fractions of the frame; times are film seconds.
+export interface Mouth { start: number; end: number; x: number; y: number; width: number; color?: string; thick?: number }
+export function mouthFilter(mouths: Mouth[], width: number, height: number): string {
+  return mouths
+    .flatMap((m) => {
+      const w = Math.round(m.width * width);
+      const cx = m.x * width;
+      const cy = m.y * height;
+      const thin = Math.max(3, Math.round(height * 0.004));
+      // 2.6x thin was too subtle to read as talking (user, 2026-10-26: "a little thicker to show the variation").
+      const thick = Math.round(thin * (m.thick ?? 4));
+      const color = m.color ?? "0x3A2018";
+      const span = `between(t,${m.start.toFixed(2)},${m.end.toFixed(2)})`;
+      return [
+        `drawbox=x=${Math.round(cx - w / 2)}:y=${Math.round(cy - thin / 2)}:w=${w}:h=${thin}:color=${color}:t=fill:enable='${span}'`,
+        `drawbox=x=${Math.round(cx - w * 0.47)}:y=${Math.round(cy - thick / 2)}:w=${Math.round(w * 0.94)}:h=${thick}:color=${color}:t=fill:enable='${span}*gt(sin(2*PI*3.3*t)+0.6*sin(2*PI*5.1*t),0.35)'`,
+      ];
+    })
+    .join(",");
+}
+
 // Joins the scene clips into one film, keeping their own sound and laying music / voiceover on top.
 export async function assemble(o: AssembleOptions): Promise<{ output: string; clips: string[]; duration: number; held_last_frame: number }> {
   // Clips can now come from anywhere, so the project folder the film is saved into may not exist yet.
@@ -141,7 +195,14 @@ export async function assemble(o: AssembleOptions): Promise<{ output: string; cl
     hold = Math.max(0, Number(stdout.trim()) + 0.6 - infos.reduce((sum, i) => sum + i.duration, 0));
   }
   // Size the film to the biggest clip so a 720p opener cannot pull a 1080p clip down with it.
-  const { width, height } = infos.reduce((a, b) => (b.width * b.height > a.width * a.height ? b : a));
+  const biggest = infos.reduce((a, b) => (b.width * b.height > a.width * a.height ? b : a));
+  // 2026-10-27: a 720x1280 film at ~1 Mbit/s went to YouTube and the user saw only an SD version. Flow delivers 720p,
+  // so for publishing the film is rendered as a 1080p master (long side 1920, lanczos) - every clip is scaled up
+  // before the mouths and captions are drawn, so the drawn parts stay sharp instead of being upscaled afterwards.
+  const scaleUp = o.resolution === "1080p" ? 1920 / Math.max(biggest.width, biggest.height) : 1;
+  const even = (n: number) => Math.round(n / 2) * 2;
+  const width = even(biggest.width * Math.max(1, scaleUp));
+  const height = even(biggest.height * Math.max(1, scaleUp));
   const args: string[] = ["-y"];
   for (const clip of clips) args.push("-i", clip);
   const filters: string[] = [];
@@ -151,7 +212,7 @@ export async function assemble(o: AssembleOptions): Promise<{ output: string; cl
   infos.forEach((info, i) => {
     const freeze = hold > 0.05 && i === infos.length - 1 ? `,tpad=stop_mode=clone:stop_duration=${hold.toFixed(2)}` : "";
     filters.push(
-      `[${i}:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24${freeze}[v${i}]`,
+      `[${i}:v]scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=lanczos:out_range=tv,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24${freeze}[v${i}]`,
     );
     filters.push(
       info.hasAudio
@@ -159,7 +220,14 @@ export async function assemble(o: AssembleOptions): Promise<{ output: string; cl
         : `anullsrc=r=48000:cl=stereo,atrim=duration=${(info.duration + (i === infos.length - 1 ? hold : 0)).toFixed(2)}[a${i}]`,
     );
   });
-  filters.push(`${infos.map((_, i) => `[v${i}][a${i}]`).join("")}concat=n=${clips.length}:v=1:a=1[v][clipaudio]`);
+  // Graphics are drawn over the joined film, so their times are film times, not clip times.
+  const graphics = o.overlays ? overlayFilter(o.overlays, width, height, join(o.dir, "_work")) : "";
+  // Drawn mouths sit on the face, so they go on before the bounce moves the picture; the bounce goes before the
+  // captions so those stay steady.
+  const motion = [mouthFilter(o.mouths ?? [], width, height), bounceFilter(o.bounce ?? [], width, height)].filter(Boolean).join(",");
+  filters.push(`${infos.map((_, i) => `[v${i}][a${i}]`).join("")}concat=n=${clips.length}:v=1:a=1[${graphics || motion ? "vraw" : "v"}][clipaudio]`);
+  if (motion) filters.push(`[vraw]${motion}[${graphics ? "vmoved" : "v"}]`);
+  if (graphics) filters.push(`[${motion ? "vmoved" : "vraw"}]${graphics}[v]`);
 
   const mix = ["[clipaudio]"];
   let input = clips.length;
@@ -180,7 +248,9 @@ export async function assemble(o: AssembleOptions): Promise<{ output: string; cl
   args.push(
     "-filter_complex", filters.join(";"),
     "-map", "[v]", "-map", "[a]",
-    "-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p",
+    // Stills come in as full-range JPEG colour (yuvj420p); players and YouTube expect TV range, so it is converted above
+    // (out_range=tv) and tagged here. A 1080p master gets a finer quality setting for the platforms' re-encode.
+    "-c:v", "libx264", "-crf", o.resolution === "1080p" ? "16" : "18", "-preset", o.resolution === "1080p" ? "slow" : "medium", "-pix_fmt", "yuv420p", "-color_range", "tv",
     "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
     output,
   );

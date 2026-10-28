@@ -84,6 +84,21 @@ export async function mediaIds(page: Page): Promise<string[]> {
   );
 }
 
+// 2026-10-25: the moment a generation starts, Flow adds a placeholder tile titled with the whole prompt and showing
+// "NN%". It has no media id, so TILE_ID_JS names it "title:<prompt>" and it counted as finished at once: the download
+// then hit an unfinished tile, and by the retry Flow had renamed it, so good stills were reported as "removed".
+// Only tiles that hold media and show no progress count as done.
+async function finishedMediaIds(page: Page): Promise<string[]> {
+  return page.evaluate(
+    (js) =>
+      [...document.querySelectorAll("flow-grid-tile-container")]
+        .filter((t) => !/\d+%/.test((t as HTMLElement).innerText) && t.querySelector("img[src], video[src]") && !t.querySelector("flow-error-tile"))
+        .map(eval(js))
+        .filter(Boolean) as string[],
+    TILE_ID_JS,
+  );
+}
+
 // The grid is virtualised and the top bar hides once it is scrolled, so every step starts from the top,
 // where new tiles appear.
 async function scrollToTop(page: Page): Promise<void> {
@@ -194,9 +209,15 @@ async function waitForNewMedia(page: Page, before: string[], count: number, time
   let failures = 0;
   while (Date.now() < deadline) {
     await pause(page, 2000);
-    const fresh = [...new Set((await mediaIds(page)).filter((id) => !before.includes(id)))];
-    // New tiles are listed first, so anything beyond the requested count is not ours.
-    if (fresh.length >= count) return fresh.slice(0, count);
+    const freshNow = async () => [...new Set((await finishedMediaIds(page)).filter((id) => !before.includes(id)))];
+    const fresh = await freshNow();
+    // New tiles are listed first, so anything beyond the requested count is not ours. Flow swaps the prompt-title
+    // for a short one just after finishing, and title: ids follow it, so read them again once that has settled.
+    if (fresh.length >= count) {
+      await pause(page, 4000);
+      const settled = await freshNow();
+      return (settled.length >= count ? settled : fresh).slice(0, count);
+    }
     const progress = await page.evaluate(() =>
       [...document.querySelectorAll("flow-grid-tile-container")].slice(0, 8).map((t) => (t as HTMLElement).innerText.match(/\d+%/)?.[0]).filter(Boolean),
     );
@@ -697,7 +718,7 @@ export async function runGeneration(job: Job): Promise<string[]> {
     if (renamed) job.note = [job.note, `renamed in Flow to ${basename(s.output_dir)}-${label}`].filter(Boolean).join(" · ");
     await pause(page, 800);
     const stem = join(s.output_dir, label);
-    const title = (await mediaTile(page, id).getAttribute("aria-label", { timeout: 5000 }).catch(() => null)) || undefined;
+    let title = (await mediaTile(page, id).getAttribute("aria-label", { timeout: 5000 }).catch(() => null)) || undefined;
     try {
       files.push(...(await downloadMedia(page, id, stem, s.download_quality)));
     } catch (err) {
@@ -706,20 +727,34 @@ export async function runGeneration(job: Job): Promise<string[]> {
       // on it here: reload, let the grid settle, and fetch it by title the way flow_download does (newest first).
       // Seen twice the same evening: the menu stayed shut for a minute or two after the clip finished, then worked.
       // So keep trying for about two minutes, reloading each time, before handing the job back as failed.
-      if (!title) throw err;
+      if (!title && id.startsWith("title:")) throw err;
       let saved: string[] | undefined;
       let last: unknown = err;
+      let idSeen = false;
       for (let attempt = 0; attempt < 4 && !saved; attempt++) {
         await pause(page, 30_000);
         await page.reload({ waitUntil: "domcontentloaded" });
         await pause(page, 4000);
         await ensureProjectGrid(page);
+        // 2026-10-25: Flow titles a fresh tile with the whole prompt, then swaps in a short title ("Man holding mug
+        // with robot") a little later. Looking up the prompt-title found nothing and four good stills were reported as
+        // "removed" while they sat at the top of the grid. So go by media id first and pick up the tile's current title.
+        if (!id.startsWith("title:") && (await mediaTile(page, id).count())) {
+          idSeen = true;
+          title = (await mediaTile(page, id).getAttribute("aria-label").catch(() => null)) || title;
+          saved = await downloadMedia(page, id, stem, s.download_quality).catch((again: unknown) => {
+            last = again;
+            return undefined;
+          });
+          if (saved) break;
+        }
+        if (!title) continue;
         saved = await downloadAsset(title, stem, s.download_quality ?? "original").catch((again: unknown) => {
           last = again;
           return undefined;
         });
       }
-      if (!saved && /No asset whose title/.test(String((last as Error)?.message ?? last))) {
+      if (!saved && !idSeen && /No asset whose title/.test(String((last as Error)?.message ?? last))) {
         // 2026-10-11: a 9:16 clip about a deepfaked news anchor rendered, got its title, then vanished from the grid
         // with no failed tile - and was NOT charged. Saying "generated, fetch it later" sent the user hunting for it.
         throw new Error(

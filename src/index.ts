@@ -226,6 +226,42 @@ server.registerTool(
 );
 
 server.registerTool(
+  "flow_channels",
+  {
+    title: "List publishing channels",
+    description:
+      "List the social channels connected in the user's Postiz (YouTube, Instagram, ...), with the names flow_publish accepts. Needs ~/.flow-mcp/postiz-url and a Postiz API key in ~/.flow-mcp/postiz-key, which the user saves themselves.",
+    inputSchema: shapes.channels,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  () => reply(patient("flow_channels", core.channels())),
+);
+
+server.registerTool(
+  "flow_posts",
+  {
+    title: "Check published posts",
+    description:
+      "List the user's Postiz posts around now (default 7 days either side): state QUEUE / PUBLISHED / ERROR, the channel, the time, the error if any, and the live link once published. Use it after flow_publish to confirm a post went out.",
+    inputSchema: shapes.posts,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  (args) => reply(patient("flow_posts", core.posts(args))),
+);
+
+server.registerTool(
+  "flow_publish",
+  {
+    title: "Publish a film through Postiz",
+    description:
+      "Upload a project's final render to the user's Postiz and schedule it (or create a draft) on the chosen channels, e.g. YouTube Shorts and Instagram Reels. PUBLIC and hard to undo: show the user the exact video, channels, title, caption and time and get their OK before every call. Needs `when` (ISO time) or `draft: true`; `now: true` only when the user explicitly asks to post immediately.",
+    inputSchema: shapes.publish,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  },
+  (args) => reply(patient("flow_publish", core.publish(args))),
+);
+
+server.registerTool(
   "flow_character",
   {
     title: "Create a reusable character",
@@ -300,7 +336,7 @@ server.registerTool(
   {
     title: "Assemble clips into one video",
     description:
-      "Join a project's downloaded scene clips in order into one MP4 (local ffmpeg, no credits). Keeps each clip's own sound and can lay a music track and a voiceover on top.",
+      "Join a project's downloaded scene clips in order into one MP4 (local ffmpeg, no credits). Keeps each clip's own sound and can lay a music track and a voiceover on top. `overlays` draws explainer-reel graphics onto the film: a corner handle, timed subtitles, label cards, a status badge and habit chips (Flow itself cannot render readable text, so put no text in the shot prompts).",
     inputSchema: shapes.assemble,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },

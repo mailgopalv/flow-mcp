@@ -1,10 +1,11 @@
-import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
-import { assemble, localVoices, speakLocally } from "./assemble.js";
-import { GEMINI_VOICES, geminiKey, saveGeminiKey, speakWithGemini } from "./gemini.js";
+import { assemble, localVoices, speakLocally, tightenPauses } from "./assemble.js";
+import { GEMINI_VOICES, geminiKey, saveGeminiKey, speakWithGemini, transcribeWithGemini } from "./gemini.js";
 import { extractLastFrame } from "./chain.js";
 import { characterLook, createCharacter, downloadAsset, openProject, trashAsset, editCharacter, getFlowState, listAssets, listCharacters, rememberCharacter, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
+import { createPost, listChannels, listPosts, uploadMedia } from "./postiz.js";
 import { JobQueue, type Job } from "./queue.js";
 import { OUTPUT_ROOT, projectDir } from "./chrome.js";
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
@@ -81,6 +82,65 @@ export const shapes = {
     voiceover: z.string().optional().describe("Absolute path to a voiceover audio file, starts at 0:00."),
     output_name: z.string().min(1).optional().describe("File name of the render. Default: <project>-final."),
     hold_last_frame: z.boolean().default(true).describe("Freeze the final frame so a longer voiceover is not cut off."),
+    resolution: z
+      .enum(["source", "1080p"])
+      .default("source")
+      .describe("'1080p' renders a publishing master (long side 1920, lanczos upscale, finer encode): use it for anything going to YouTube or Instagram - a 720p upload showed only SD on YouTube. 'source' keeps the clips' size."),
+    bounce: z
+      .array(z.object({ start: z.number().min(0), end: z.number().positive() }))
+      .optional()
+      .describe("Film-time spans where the WHOLE FRAME bobs, background included. The user rejected it as camera shake (claude-reel-p2, 2026-10-26); prefer a clip where only the character moves. Use only briefly, if at all."),
+    mouths: z
+      .array(
+        z.object({
+          start: z.number().min(0),
+          end: z.number().positive(),
+          x: z.number().min(0).max(1).describe("Mouth centre, fraction of the frame width."),
+          y: z.number().min(0).max(1).describe("Mouth centre, fraction of the frame height."),
+          width: z.number().min(0.01).max(0.5).describe("Mouth width, fraction of the frame width."),
+          color: z.string().optional().describe("ffmpeg colour, default dark brown 0x3A2018."),
+          thick: z.number().min(1.5).max(8).optional().describe("How much thicker the 'open' line is than the closed one. Default 4 (the user's choice; 2.6 was too subtle)."),
+        }),
+      )
+      .optional()
+      .describe("A figurine mouth drawn in the edit: a short dark line that goes thin-thick while the character speaks, over a locked-off shot whose mouth sits at a known spot. Safer than asking the video model for a closed mouth, which it ignores when the character talks."),
+    overlays: z
+      .object({
+        logo: z.string().max(40).optional().describe("Handle shown small in the top-left corner for the whole film, e.g. 'gentlevibzz'."),
+        captions: z
+          .array(z.object({ text: z.string().min(1), start: z.number().min(0), end: z.number().positive() }))
+          .optional()
+          .describe("Subtitles: one entry per spoken line with the seconds it is spoken; shown three words at a time."),
+        caption_style: z
+          .enum(["words", "line-top"])
+          .optional()
+          .describe("'words' (default): three words at a time, low in the frame, explainer style. 'line-top': the whole line at once in a dark pill near the top, for dialogue sketches."),
+        cards: z
+          .array(z.object({ title: z.string().min(1).max(30), subtitle: z.string().max(40).optional(), start: z.number().min(0), end: z.number().positive(), tone: z.enum(["neutral", "alert", "good"]).optional() }))
+          .optional()
+          .describe("Label cards near the top: small spaced title (e.g. 'TELOMERES') over a bold line. tone: neutral gold, alert red, good green."),
+        badges: z
+          .array(z.object({ text: z.string().min(1).max(24), start: z.number().min(0), end: z.number().positive(), tone: z.enum(["neutral", "alert", "good"]).optional() }))
+          .optional()
+          .describe("Solid status badge mid-screen, e.g. 'REPAIR · ON' (default tone good)."),
+        chips: z
+          .array(z.object({ items: z.array(z.string().min(1).max(30)).min(1).max(6), start: z.number().min(0), end: z.number().positive(), stagger: z.number().min(0).max(5).optional() }))
+          .optional()
+          .describe("A stack of small chips that appear one after another (stagger seconds apart, default 0.6)."),
+        term: z
+          .object({
+            word: z.string().min(1).max(24),
+            meaning: z.string().min(1).max(110),
+            start: z.number().min(0),
+            end: z.number().positive(),
+            label: z.string().max(16).optional(),
+            tone: z.enum(["neutral", "alert", "good"]).optional(),
+          })
+          .optional()
+          .describe("Term card that explains one AI term at the end of a reel: the frame dims, a small label (default 'AI TERM'), the term large, its meaning below. Place it after the last spoken line, e.g. the last 3 s, with hold_last_frame so the film runs long enough."),
+      })
+      .optional()
+      .describe("On-screen graphics drawn onto the film (free). All times are seconds in the finished film."),
   },
   agent: {
     project: z.string().min(1).describe("Folder name for the downloaded images."),
@@ -100,6 +160,12 @@ export const shapes = {
     text: z.string().min(1).max(400).describe("The line to speak. About 20 words fits 8 s, 30 words fits 12 s; anything longer needs a longer take."),
     voice: z.string().min(1).default("Charon").describe("Voice name from flow_voices, e.g. Charon (informative), Aoede (breezy), Gacrux (mature) for Google; Zoe or Samantha for macOS."),
     style: z.string().max(200).optional().describe("Delivery note for the 'gemini' engine, e.g. 'slowly and warmly, like a documentary narrator'."),
+    max_pause: z
+      .number()
+      .min(0.1)
+      .max(3)
+      .optional()
+      .describe("Shorten every pause longer than this many seconds down to it. Gemini stretches 'deadpan' or 'tired' deliveries with 2 s gaps between sentences; 0.5 keeps them tight."),
   },
   edit: {
     project: z.string().min(1).describe("Local folder for the edited clip."),
@@ -141,6 +207,26 @@ export const shapes = {
   },
   trash: { name: z.string().min(1).describe("Exact title of the item to move to Flow's Trash, as listed by flow_assets.") },
   set_key: { key: z.string().min(1).max(200) },
+  channels: {},
+  posts: {
+    days: z.number().min(1).max(60).default(7).describe("How many days back and forward from now to look."),
+  },
+  publish: {
+    project: z.string().min(1).describe("Project whose film to publish."),
+    file: z.string().min(1).optional().describe("Absolute path of the video. Default: the newest <project>-final*.mp4 in the project folder."),
+    channels: z
+      .array(z.string().min(1))
+      .min(1)
+      .describe("Postiz channels to post to, by name, platform ('youtube', 'instagram') or id, as listed by flow_channels."),
+    text: z.string().min(1).max(5000).describe("Caption / description, hashtags included."),
+    title: z.string().min(2).max(100).optional().describe("Video title (YouTube needs one, 2-100 characters)."),
+    when: z.string().optional().describe("When to publish, ISO 8601 with a timezone, e.g. '2026-10-28T18:00:00+00:00'. Required unless now or draft is set."),
+    now: z.boolean().default(false).describe("Publish immediately. Only when the user has explicitly asked for it."),
+    draft: z.boolean().default(false).describe("Create a draft in Postiz for the user to check and send by hand."),
+    privacy: z.enum(["public", "unlisted", "private"]).default("public").describe("YouTube visibility."),
+    made_for_kids: z.boolean().default(false).describe("YouTube 'made for kids' declaration."),
+    tags: z.array(z.string().min(1)).max(30).optional().describe("YouTube tags."),
+  },
   discard: { path: z.string().min(1).describe("A saved film, still, narration or whole project folder inside the films folder, to move to this computer's bin (Mac Trash, Windows Recycle Bin).") },
   outputs: {},
   characters: {},
@@ -221,6 +307,9 @@ export interface Core {
   trash(a: Args<"trash">): Promise<unknown>;
   discard(a: Args<"discard">): Promise<unknown>;
   set_key(a: Args<"set_key">): Promise<unknown>;
+  channels(): Promise<unknown>;
+  posts(a: Args<"posts">): Promise<unknown>;
+  publish(a: Args<"publish">): Promise<unknown>;
   continue_shot(a: Args<"continue_shot">): Promise<unknown>;
   agent(a: Args<"agent">): Promise<unknown>;
   outputs(): Promise<unknown>;
@@ -473,6 +562,55 @@ export class LocalCore implements Core {
     return trashAsset(name);
   }
 
+  async channels() {
+    return listChannels();
+  }
+
+  async posts({ days }: Args<"posts">) {
+    const span = days * 86_400_000;
+    return listPosts(new Date(Date.now() - span), new Date(Date.now() + span));
+  }
+
+  // Publishing is public and cannot be taken back from here, so nothing goes out "now" unless asked for in so many
+  // words: a time (schedule) or a draft is required otherwise.
+  async publish({ project, file, channels, text, title, when, now, draft, privacy, made_for_kids, tags }: Args<"publish">) {
+    if (!when && !now && !draft) throw new Error("Say when to publish (when: an ISO time), or set draft: true. now: true only if the user explicitly asked to post immediately.");
+    if (when && Number.isNaN(Date.parse(when))) throw new Error(`'${when}' is not a time I can read. Use ISO 8601, e.g. 2026-10-28T18:00:00+00:00.`);
+    if (when && !now && !draft && Date.parse(when) < Date.now() + 60_000) throw new Error(`${when} is in the past (or under a minute away). Pick a later time or use now: true.`);
+    const dir = projectDir(project);
+    const video =
+      file ??
+      (existsSync(dir)
+        ? readdirSync(dir)
+            .filter((f) => f.startsWith(`${project}-final`) && f.endsWith(".mp4"))
+            .map((f) => join(dir, f))
+            .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0]
+        : undefined);
+    if (!video || !existsSync(video)) throw new Error(`No final render found for ${project}. Pass file, or render it with flow_assemble first.`);
+
+    const all = await listChannels();
+    const picked = channels.map((want) => {
+      const w = want.toLowerCase();
+      const hits = all.filter((c) => !c.disabled && (c.id === want || c.name.toLowerCase() === w || c.identifier === w || c.profile?.toLowerCase() === w));
+      if (hits.length !== 1) {
+        throw new Error(
+          `${hits.length ? `"${want}" matches ${hits.length} channels` : `No connected channel "${want}"`}. Connected: ${all.map((c) => `${c.name} (${c.identifier})`).join(", ") || "none"}.`,
+        );
+      }
+      return hits[0];
+    });
+
+    const media = await uploadMedia(video);
+    const created = await createPost({ channels: picked, media, text, title, when: now ? undefined : when, draft, privacy, made_for_kids, tags });
+    return {
+      published: now ? "now" : draft ? "draft" : `scheduled for ${new Date(when!).toISOString()}`,
+      video,
+      channels: picked.map((c) => `${c.name} (${c.identifier})`),
+      media: media.path,
+      postiz: created,
+    };
+  }
+
   async character(a: Args<"character">) {
     if (this.queue.busy) throw new Error(BUSY);
     if (!a.image && !a.describe) throw new Error("Pass either `describe` (Flow draws the portrait) or `image`.");
@@ -507,12 +645,34 @@ export class LocalCore implements Core {
     return { gemini: GEMINI_VOICES, gemini_ready: Boolean(geminiKey()), mac: await localVoices(), place };
   }
 
-  async narrate({ project, text, voice, engine, style }: Args<"narrate">) {
+  async narrate({ project, text, voice, engine, style, max_pause }: Args<"narrate">) {
     const output_dir = projectDir(project);
     mkdirSync(output_dir, { recursive: true });
-    const target = join(output_dir, `${this.nextStem(output_dir, "narration")}.m4a`);
-    const spoken = engine === "mac" ? await speakLocally(text.trim(), voice, target) : await speakWithGemini(text.trim(), voice, target, style);
-    return { output_dir, credits: 0, engine, voice, ...spoken };
+    // 2026-10-26: two narrations started together both got narration-07 (the number comes from what is on disk, and
+    // a take only lands when it is finished), so the later one overwrote the earlier. The file is now reserved the
+    // moment its number is picked: an exclusive create fails if another call took it, and we try the next number.
+    let target = "";
+    for (let tries = 0; !target && tries < 50; tries++) {
+      const candidate = join(output_dir, `${this.nextStem(output_dir, "narration")}.m4a`);
+      try {
+        writeFileSync(candidate, "", { flag: "wx" });
+        target = candidate;
+      } catch {
+        // taken a moment ago: nextStem now sees it on disk and moves on
+      }
+    }
+    if (!target) throw new Error(`Could not reserve a narration file name in ${output_dir}.`);
+    try {
+      const spoken = engine === "mac" ? await speakLocally(text.trim(), voice, target) : await speakWithGemini(text.trim(), voice, target, style);
+      if (max_pause) spoken.duration = await tightenPauses(target, max_pause);
+      // What the take really says, so a paraphrase is caught here and not by the viewer. Best effort: a failed
+      // check never costs the take.
+      const heard = engine === "gemini" ? await transcribeWithGemini(target).catch((e: Error) => `(not checked: ${e.message})`) : undefined;
+      return { output_dir, credits: 0, engine, voice, ...spoken, ...(heard !== undefined && { heard }) };
+    } catch (err) {
+      rmSync(target, { force: true });
+      throw err;
+    }
   }
 
   async techniques({ category }: Args<"techniques">) {

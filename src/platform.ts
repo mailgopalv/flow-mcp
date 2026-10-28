@@ -88,3 +88,24 @@ export function openUrl(url: string): void {
     // Opening the browser is a convenience; the address is printed either way.
   }
 }
+
+// Fonts for the text flow_assemble draws onto a film (captions, cards, badges). The first file that exists wins.
+const firstFont = (...paths: string[]) => paths.find((p) => existsSync(p));
+const WINDIR = process.env.WINDIR ?? "C:/Windows";
+export const FONTS = {
+  sans: IS_WIN
+    ? firstFont(`${WINDIR}/Fonts/segoeui.ttf`, `${WINDIR}/Fonts/arial.ttf`)
+    : IS_MAC
+      ? firstFont("/System/Library/Fonts/Supplemental/Arial.ttf", "/Library/Fonts/Arial.ttf")
+      : firstFont("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+  bold: IS_WIN
+    ? firstFont(`${WINDIR}/Fonts/segoeuib.ttf`, `${WINDIR}/Fonts/arialbd.ttf`)
+    : IS_MAC
+      ? firstFont("/System/Library/Fonts/Supplemental/Arial Bold.ttf", "/Library/Fonts/Arial Bold.ttf")
+      : firstFont("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+  mono: IS_WIN
+    ? firstFont(`${WINDIR}/Fonts/consolab.ttf`, `${WINDIR}/Fonts/consola.ttf`, `${WINDIR}/Fonts/cour.ttf`)
+    : IS_MAC
+      ? firstFont("/System/Library/Fonts/Menlo.ttc", "/System/Library/Fonts/Monaco.ttf")
+      : firstFont("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"),
+};

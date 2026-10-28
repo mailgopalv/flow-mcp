@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { HOME_DIR } from "./chrome.js";
@@ -73,15 +73,25 @@ export async function speakWithGemini(text: string, voice: string, target: strin
     );
   }
   const prompt = style ? `Say ${style}: ${text}` : text;
-  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-goog-api-key": key },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } } },
-    }),
-  });
-  const body = (await res.json()) as { error?: { message?: string }; candidates?: { content?: { parts?: TtsPart[] } }[] };
+  // The free tier allows only 3 TTS requests a minute (hit 2026-10-11 on the 4th line of a 5-line script). Google says
+  // how long to wait ("Please retry in 23.3s"), so a per-minute limit is waited out - twice at most, never over a
+  // minute each. A daily limit is reported straight away: waiting would not help.
+  let res: Response;
+  let body: { error?: { message?: string }; candidates?: { content?: { parts?: TtsPart[] } }[] };
+  for (let attempt = 0; ; attempt++) {
+    res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": key },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } } },
+      }),
+    });
+    body = (await res.json()) as typeof body;
+    const wait = Number(body.error?.message?.match(/retry in ([\d.]+)s/i)?.[1]);
+    if (res.status !== 429 || attempt >= 2 || !(wait > 0 && wait <= 60) || /per.?day/i.test(body.error?.message ?? "")) break;
+    await new Promise((r) => setTimeout(r, (wait + 1) * 1000));
+  }
   if (!res.ok) throw new Error(`Gemini TTS refused this take (${res.status}): ${body.error?.message ?? "no detail"}`);
   const part = body.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data);
   if (!part?.inlineData?.data) throw new Error("Gemini returned no audio for this line.");
@@ -96,7 +106,46 @@ export async function speakWithGemini(text: string, voice: string, target: strin
   ]);
   const { stdout } = await run("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", target]);
   const duration = Number(stdout.trim());
-  writeFileSync(raw, "");
-  await run("rm", ["-f", raw]).catch(() => {});
+  // `rm` does not exist on Windows, so every take used to leave its raw .pcm next to the .m4a.
+  rmSync(raw, { force: true });
   return { output: target, duration };
+}
+
+// Writes down what a take actually says, with Gemini's ordinary model (a separate, much larger free quota than TTS).
+// 2026-10-26: captions for a two-hander were laid by splitting one long take at its pauses, and Claude could not hear
+// whether Gemini had said the line as written - the user saw captions that did not match the voice. A transcript
+// next to the requested text catches a paraphrased or split line before it reaches the film.
+const LISTEN_MODEL = process.env.FLOW_MCP_GEMINI_LISTEN ?? "gemini-2.5-flash";
+export async function transcribeWithGemini(file: string): Promise<string> {
+  const key = geminiKey();
+  if (!key) throw new Error("No Gemini key, so the take cannot be checked.");
+  const wav = file.replace(/\.\w+$/, "") + ".listen.wav";
+  await run(FFMPEG, ["-y", "-i", file, "-ac", "1", "-ar", "16000", wav]);
+  try {
+    // The free tier allows 5 of these a minute; like the TTS call, a per-minute limit is waited out (twice at most).
+    let res: Response;
+    let body: { error?: { message?: string }; candidates?: { content?: { parts?: { text?: string }[] } }[] };
+    for (let attempt = 0; ; attempt++) {
+      res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${LISTEN_MODEL}:generateContent`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-goog-api-key": key },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { inlineData: { mimeType: "audio/wav", data: readFileSync(wav).toString("base64") } },
+              { text: "Transcribe exactly the words spoken in this audio, in order. Write a non-speech sound such as a sigh as [sigh]. Reply with the transcript only." },
+            ],
+          }],
+        }),
+      });
+      body = (await res.json()) as typeof body;
+      const wait = Number(body.error?.message?.match(/retry in ([\d.]+)s/i)?.[1]);
+      if (res.status !== 429 || attempt >= 2 || !(wait > 0 && wait <= 60) || /per.?day/i.test(body.error?.message ?? "")) break;
+      await new Promise((r) => setTimeout(r, (wait + 1) * 1000));
+    }
+    if (!res.ok) throw new Error(`Gemini could not transcribe the take (${res.status}): ${body.error?.message ?? "no detail"}`);
+    return (body.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? "").join("").trim();
+  } finally {
+    rmSync(wav, { force: true });
+  }
 }

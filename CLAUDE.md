@@ -361,3 +361,84 @@ The preview tool could not read the project while it lived in ~/Desktop; check t
   desk"), then disappeared from the grid with no error tile, and the 15 credits were NOT charged (balance confirmed). Likely
   a content filter on "deepfaked news anchor", unconfirmed - the identical prompt passed on the re-run. The download
   fallback now reports a removed clip as removed. 9:16 Omni 720p 10 s also quotes 15 credits.
+- OVERLAYS (2026-10-11, built for a science-explainer reel modelled on life_laps_official's "DNA and stress"):
+  flow_assemble `overlays` draws a corner handle, word-group subtitles (3 words, timed by character share of each spoken
+  line), label cards (spaced mono title over a bold line, tone bar neutral/alert/good), a solid badge and staggered chips,
+  all with ffmpeg drawtext/drawbox (src/overlays.ts; fonts in platform.ts FONTS). Text goes via textfile= in
+  <project>/_work/overlay-text, so apostrophes/%/: need no escaping. Verified on Windows (Segoe UI / Consolas). Times are
+  FILM seconds; take caption spans from where each narration take was placed.
+- FALSE "REMOVED" (2026-10-25, claude-reel-p1): a fresh tile is first titled with the WHOLE PROMPT, then Flow swaps in
+  a short title ("Man holding mug with robot"). When the first download of a fresh still failed, the fallback searched
+  for the prompt-title, found nothing and reported "Flow rendered ... and then removed it" - while the image sat at the
+  top of the grid (flow_assets showed it; flow_download fetched it). The fallback now retries by media id first and
+  re-reads the current title; "removed" is only reported when the id is gone too. ROOT CAUSE: the placeholder tile
+  Flow adds the instant a generation starts (prompt-title, "NN%", no media id) got a `title:<prompt>` id from
+  TILE_ID_JS and counted as finished at once, so every job went straight into the 4 x 30 s reload fallback (~3.5 min
+  per still). waitForNewMedia now uses finishedMediaIds (media present, no "%", no error tile) and re-reads the ids
+  4 s after finishing so title: ids follow Flow's rename.
+- DIALOGUE SKETCH (claude-reel-p1, 2026-10-25): flow_assemble overlays take `caption_style: "line-top"` - the whole
+  line at once in a dark pill near the top (wrapLine: at most 26 chars a row, rows balanced so no word is left
+  alone on the second row), for two-hander reels. Recording each
+  character's lines as ONE Gemini take with blank lines between them, then cutting at silencedetect gaps, beats the
+  3-requests/minute limit (2 calls instead of 21); Gemini leaves ~2 s between lines for one voice, ~0.5 s for another.
+  Six 4 s Omni clips (42 credits) cut into 22 shots made a 56 s reel; the edit script is projects/claude-reel-p1/_work/build-edit.mjs.
+  GAP: two VIDEO tiles with the same Flow title collapse into one in scanGrid (keyed by title; video ids at rest are
+  title-based), so flow_download can only fetch the newest. Not fixed yet - the user renaming the older tile in Flow
+  ("gopal-talk") and flow_download by that name worked; the real fix is keying the scan by DOM position. flow_narrate also leaves its raw .pcm next to the .m4a.
+- SECOND GOOGLE ACCOUNT (2026-10-26): with two accounts signed in, the second one lives at `flow.google.com/u/1/`.
+  FLOW_URL is the bare `https://flow.google.com/`, which is ALWAYS the default account (u/0), so flow_project silently
+  created claude-reel-p2 on the OLD account (it showed that account's credits). How Flow addresses projects under /u/1
+  was never mapped (the window was signed out before it could be). Remedy used: the user signed out of every account
+  and signed in with only the new one, so it became u/0. Check plan + credits_remaining after switching accounts.
+  Gopal's second account: PLUS plan, 250 credits.
+- FIGURINE MOUTHS (claude-reel-p2 v2, 2026-10-26, user's call after v1): the user wants speakers' mouths as in the
+  reference reel - a short line going thin/thick - and a mouthless robot that bobs when it talks, so lip sync can never
+  look wrong. Omni IGNORES "mouth never opens, no teeth" whenever the prompt says the character talks (scene-12: open
+  mouth with teeth, 7 credits wasted), and it adds a small mouth dash to a mouthless robot as it emotes. What works:
+  talking shots are a line-mouth STILL held locked (no zoom, or a fixed crop), flow_assemble `mouths` draws the line
+  (thin bar for the span + thick bar toggled by `enable`, because drawbox fixes w/h once); video clips are kept for
+  SILENT reactions only. `bounce` (whole-frame bob) was REJECTED by the user as "the whole scene vibrates" - a
+  mouthless character talks on its own moving take instead (eye bars shift, antennae blink), stray mouth painted out.
+  User's settled look (v4): the drawn mouth's thick state is 4x the thin one (`thick`, default 4; 2.6 was too subtle),
+  and the bot's glowing mouth dash is removed with `delogo`, which leaves a soft glow in the mouth area while it
+  talks - the user likes that glow, so keep delogo rather than an opaque patch. A stray dash in a clip is removed with
+  ffmpeg `delogo` over its spot (time-windowed, the robot sinks while sighing). Check every clip's mouth with face
+  crops sampled every 0.25 s - a 3-frame contact sheet missed the dash and an open-mouthed laugh in the ending.
+- CAPTIONS MUST BE CHECKED AGAINST THE AUDIO: v1 split one long Gemini take per character at its pauses; Gemini put
+  pauses inside lines and said "Clyde" for "Claude" and "technology" for "tech knowledge", so captions mismatched.
+  Record one take per line, and read flow_narrate's `heard` (transcribed by gemini-2.5-flash; gemini-flash-latest has
+  its own quota, the 2.0 models are gone). Free-tier DAILY caps: TTS 10 requests, gemini-2.5-flash 20 - a 13-line
+  script plus checks uses both up. Gemini also truncates now and then ("Is this how I co-"). flow_narrate now: reserves
+  narration-NN atomically (two concurrent calls both wrote narration-07), `max_pause` caps Gemini's long deadpan gaps
+  (11.7 s -> 7.6 s), and no longer leaves .pcm files (it shelled out to `rm`, absent on Windows).
+- PUBLISHING (2026-10-26): `flow_channels` / `flow_publish` (src/postiz.ts) talk to the user's self-hosted Postiz
+  public API: base from ~/.flow-mcp/postiz-url (https://postiz.ygassets.co.uk; self-hosted paths are /api/public/v1/...),
+  key from ~/.flow-mcp/postiz-key (user writes it, Claude never sees it; header `Authorization: <key>`, no Bearer).
+  Flow: GET /integrations (platform = `identifier`) -> POST /upload (multipart `file`, returns {id, path}) -> POST /posts
+  ({type schedule|now|draft, date ISO, shortLink, tags, posts:[{integration:{id}, value:[{content, image:[{id,path}]}],
+  settings:{__type ...}}]}). YouTube settings: title 2-100 chars, type public|unlisted|private, selfDeclaredMadeForKids
+  "yes"|"no". The tool refuses to post without `when`, `draft` or an explicit `now`. Post-creation is rate limited
+  (~30/hour self-hosted, API_LIMIT). VERIFIED 2026-10-27: claude-reel-p2 v4 scheduled private to YouTube @mailgopalv,
+  state PUBLISHED at the set minute, releaseURL https://www.youtube.com/watch?v=qeTrYgTQqAk. Postiz's log says nothing on a
+  good publish - read the state with `flow_posts` (GET /posts?startDate&endDate -> state, releaseURL, error).
+  An older Claude session's flow-mcp still owned port 8787 (from 25 Oct), so new tools answered "Not found." through
+  RemoteCore until the user closes that session; dist/postiz.js can be driven directly meanwhile.
+- INSTAGRAM (verified 2026-10-28): Postiz channel "Instagram (Standalone)", identifier `instagram-standalone`;
+  settingsFor sends post_type "post", which Instagram turns into a Reel for a 9:16 video. Meta fetches the video from
+  `https://postiz.ygassets.co.uk/uploads/...` through the tunnel (checked 200 with a facebookexternalhit UA). The public
+  API has NO edit: to change a queued post, DELETE /posts/<id> and create it again. One createPost to YouTube +
+  Instagram published both (claude-reel-p2 v5 -> youtube.com/watch?v=VKgbkogvzNY, instagram.com/reel/DfDEVLODZYz).
+- PUBLISHING QUALITY (2026-10-27): the first YouTube test (720x1280, ~1 Mbit/s, yuvj420p full-range from the JPEG
+  stills) showed only "SD" to the user. YouTube serves SD first and HD after processing, but a 720p upload is also capped
+  low. flow_assemble `resolution: "1080p"` renders a publishing master: every clip lanczos-scaled to long side 1920
+  BEFORE mouths/captions are drawn (they stay sharp), out_range=tv + `-color_range tv`, crf 16 preset slow -> 1080x1920,
+  ~2.9 Mbit/s for the 52 s reel. Always publish the 1080p master.
+- DIALOGUE-REEL SKILL (2026-10-27): `.claude/skills/dialogue-reel/SKILL.md` + engine `scripts/reel.mjs`
+  (lines | edit | render | check, driven by projects/<p>/_work/reel.json). Rebuilding claude-reel-p2 through it gave the
+  same 18 cuts, 52.34 s, PSNR 61 dB against the hand-built v5 master. Dynamic imports on Windows need pathToFileURL.
+- TERM CARD (2026-10-28, Geek and AI = comedy that explains one AI term per reel): flow_assemble `overlays.term`
+  {word, meaning, start, end, label?, tone?} dims the frame and centres "A I  T E R M" / the word / an accent rule / the
+  meaning (wrapLine 30). reel.json `term` {word, meaning, len=3.5} runs the end shot len seconds longer and puts the
+  card there, after the last caption. Checked on a 1080p render; the reel.mjs path is syntax-checked, not yet run.
+- Gemini TTS free tier: 3 requests/minute per model (429 "Please retry in 23s"). speakWithGemini now waits that out
+  (twice at most, <=60 s each); a per-day limit fails at once. Omni 1.1 Flash 720p 6 s 9:16 = 10 credits.
